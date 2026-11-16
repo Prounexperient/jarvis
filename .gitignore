@@ -1,0 +1,13 @@
+.venv/ 
+data/ 
+__pycache__/ 
+.venv_kokoro/ 
+.venv_tts/ 
+functional_bkps/ 
+md/ 
+models/ 
+voices/ 
+*.bat
+*.md
+tests/
+*.txt
