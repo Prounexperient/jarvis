@@ -50,7 +50,7 @@ class TaskController:
         self.write_authorized = bool(WRITE_WORDS.search(normalized) or self.confirmed_request) and not (DENIAL.fullmatch(normalized) or self.policy.resolver.resolve(user_request).negative_command)
         self.edit_requested = bool(EDIT_WORDS.search(normalized) or self.confirmed_request)
 
-    def inspect(self, name, args, *, verified_origin=None):
+    def inspect(self, name, args, *, verified_origin=None, verified_media_context=False):
         signature = (name, json.dumps(args, sort_keys=True, ensure_ascii=False))
         if signature == self.last_signature:
             self.repetitions += 1
@@ -67,4 +67,5 @@ class TaskController:
             write_authorized=self.write_authorized,
             confirmed_request=self.confirmed_request,
             verified_origin=verified_origin,
+            verified_media_context=verified_media_context,
         )

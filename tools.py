@@ -48,6 +48,13 @@ def _resolve_roots(config):
         p = _normalize_local_path(item)
         if p.exists():
             roots.append(p)
+    # Bibliotecas pessoais de mídia devem funcionar no Windows mesmo sem
+    # configuração manual; somente diretórios existentes são acrescentados.
+    if os.name == 'nt':
+        for label in ('Music', 'Videos', 'Documents', 'Downloads', 'Pictures'):
+            standard = (Path.home() / label).resolve()
+            if standard.is_dir() and standard not in roots:
+                roots.append(standard)
     derived = (Path.home() / 'JARVIS_DERIVED_PROJECTS').resolve()
     # A raiz gerenciada é autorizada mesmo antes de existir.
     roots.append(derived)
@@ -123,9 +130,18 @@ def search_directories(query, config, drive=None, minimum_score=60):
     timeout = float(config.get('file_search', {}).get('timeout_seconds', 30))
     candidates = []
     timed_out = False
+    seen_paths = set()
     for root in _resolve_roots(config):
         if drive and ntpath.splitdrive(str(root))[0].upper() != drive + ':':
             continue
+        # A própria raiz é uma candidata legítima (ex.: ~/Videos).
+        # Antes este código examinava somente suas subpastas.
+        root_score = _score(q, root.name)
+        if root.is_dir() and root_score >= minimum_score:
+            key = os.path.normcase(str(root))
+            if key not in seen_paths:
+                candidates.append((root_score, str(root)))
+                seen_paths.add(key)
         for current, folders, files in os.walk(root, followlinks=False):
             if time.monotonic() - started > timeout:
                 timed_out = True
@@ -133,8 +149,11 @@ def search_directories(query, config, drive=None, minimum_score=60):
             folders[:] = [d for d in folders if d.casefold() not in SKIP_DIRS and not d.startswith('.') and not (Path(current)/d).is_symlink()]
             for folder in folders:
                 score = _score(q, folder)
-                if score >= minimum_score:
-                    candidates.append((score, str(Path(current)/folder)))
+                candidate = str(Path(current) / folder)
+                key = os.path.normcase(candidate)
+                if score >= minimum_score and key not in seen_paths:
+                    candidates.append((score, candidate))
+                    seen_paths.add(key)
     candidates.sort(key=lambda item: (-item[0], item[1].casefold()))
     results = [{'index': i, 'name': Path(path).name, 'path': path, 'score': round(score,1), 'type': 'directory'}
                for i, (score, path) in enumerate(candidates[:12], 1)]
@@ -186,7 +205,7 @@ def search_directories_by_content(config, extensions=None):
             'diagnostics':{'directories_examined':examined, 'matching_directories':len(matches)}}
 
 
-def search_files_in_directory(directory, config, extension=None, query=None):
+def search_files_in_directory(directory, config, extension=None, query=None, extensions=None):
     """Busca arquivos somente dentro do diretório autorizado informado."""
     global _LAST_SEARCH, _LAST_SEARCH_KIND
     _LAST_SEARCH = []
@@ -197,6 +216,16 @@ def search_files_in_directory(directory, config, extension=None, query=None):
     ext = str(extension or '').lower().lstrip('.')
     if ext and not re.fullmatch(r'[a-z0-9]{1,12}', ext):
         return {'error': 'Extensão inválida.'}
+    allowed_extensions = set()
+    if extensions is not None:
+        if ext:
+            return {'error': 'Use extension ou extensions, não ambos.'}
+        if not isinstance(extensions, str):
+            return {'error': 'Extensões inválidas.'}
+        allowed_extensions = {x.strip().lower().lstrip('.') for x in extensions.split(',') if x.strip()}
+        if (not allowed_extensions or len(allowed_extensions) > 16 or
+                any(not re.fullmatch(r'[a-z0-9]{1,12}', x) for x in allowed_extensions)):
+            return {'error': 'Extensões inválidas.'}
     # Não usa busca global e não confunde nome de pasta com nome de arquivo.
     import time
     start = time.monotonic()
@@ -211,7 +240,7 @@ def search_files_in_directory(directory, config, extension=None, query=None):
         folders[:] = [d for d in folders if not d.startswith('.') and d.casefold() not in {'.git','.venv','venv','node_modules','__pycache__'} and not (Path(current)/d).is_symlink()]
         for filename in sorted(files, key=str.casefold):
             candidate = Path(current)/filename
-            if candidate.is_symlink() or (ext and candidate.suffix.lower() != '.'+ext):
+            if candidate.is_symlink() or (ext and candidate.suffix.lower() != '.'+ext) or (allowed_extensions and candidate.suffix.lower().lstrip('.') not in allowed_extensions):
                 continue
             if query and normalize(query) not in normalize(filename):
                 continue
@@ -278,7 +307,7 @@ def open_file(path, config):
     p = _require_path(path, config)
     if not p.is_file():
         raise ValueError('Não é um arquivo.')
-    if p.suffix.lower() in {'.exe', '.bat', '.cmd', '.ps1', '.vbs', '.msi', '.scr', '.lnk', '.com', '.pif', '.hta', '.wsf', '.wsh', '.jar', '.reg', '.cpl', '.msc', '.url', '.appref-ms', '.js', '.jse'}:
+    if p.suffix.lower() in {'.exe', '.bat', '.cmd', '.ps1', '.psm1', '.vbs', '.msi', '.scr', '.lnk', '.com', '.pif', '.hta', '.wsf', '.wsh', '.jar', '.reg', '.cpl', '.msc', '.url', '.appref-ms', '.js', '.jse', '.py', '.pyw', '.sh', '.pl', '.rb'}:
         raise PermissionError('Arquivos executáveis e scripts não podem ser abertos por esta ferramenta.')
     os.startfile(str(p))
     return {'opened': str(p)}
@@ -464,7 +493,7 @@ SCHEMAS = [
     _schema('search_files', 'Busque em tempo real por nome aproximado, sem indice. Retorna resultados numerados por relevancia. Se houver apenas um, diga que encontrou um arquivo e nao peca indice. Para abrir use open_search_result, nunca invente caminhos.', {'query':S('Termos principais do nome, sem frases como encontre meu'), 'extension':S('Extensao opcional, como pdf ou docx'), 'modified_after':S('Data ISO opcional inclusiva, AAAA-MM-DD'), 'modified_before':S('Data ISO opcional exclusiva, AAAA-MM-DD')}, ['query']),
     _schema('search_directories_by_content', 'Localize PASTAS que contenham arquivos de áudio, vídeo ou outras extensões, sem precisar saber o nome da pasta. Padrão: mp3,wav,flac,ogg,m4a. Retorna pastas e contagens, pode abrir por índice.', {'extensions':S('Extensões separadas por vírgula, ex.: mp3,wav,flac')}, []),
     _schema('search_directories', 'Localize PASTAS pelo nome, opcionalmente restringindo a uma unidade antes de limitar os resultados. Não afirmar ausência quando timed_out.', {'query':S('Nome da pasta'), 'drive':S('Unidade opcional, letra como C ou D'), 'minimum_score':{'type':'number', 'description':'Pontuação mínima opcional, padrão 60; valor entre 45 e 100'}}, ['query']),
-    _schema('search_files_in_directory', 'Liste arquivos dentro de uma pasta previamente localizada. Restringe fisicamente a busca ao diretório e ordena por caminho; para primeiro MP3 use extension mp3, depois open_search_result index 1.', {'directory':S('Caminho absoluto da pasta retornado por search_directories'), 'extension':S('Extensão opcional como mp3'), 'query':S('Filtro opcional no nome do arquivo')}, ['directory']),
+    _schema('search_files_in_directory', 'Liste arquivos dentro de uma pasta previamente localizada. Restringe fisicamente a busca ao diretório e ordena por caminho; para primeiro MP3 use extension mp3, depois open_search_result index 1.', {'directory':S('Caminho absoluto da pasta retornado por search_directories'), 'extension':S('Extensão opcional como mp3'), 'query':S('Filtro opcional no nome do arquivo'), 'extensions':S('Extensões opcionais separadas por vírgula; ex.: mp4,mkv,avi')}, ['directory']),
     _schema('open_search_result', 'Abre ARQUIVO ou PASTA numerado da ultima busca, se o usuario tiver pedido abertura. Com resultado unico, referencias como esse arquivo ou abra-o indicam indice 1. Se houver varios e nao houver escolha, pergunte por voz.', {'index':{'type':'integer','description':'Numero do resultado, comecando em 1'}}, ['index']),
     _schema('reveal_search_result', 'Revela arquivo ou abre pasta numerada da ultima busca no Explorador, sem executar arquivo.', {'index':{'type':'integer','description':'Numero do resultado, comecando em 1'}}, ['index']),
     _schema('open_directory', 'Abra uma pasta autorizada no Explorador do Windows, usando caminho absoluto retornado por search_directories.', {'path':S('Caminho absoluto da pasta')}, ['path']),

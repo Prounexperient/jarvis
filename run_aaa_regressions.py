@@ -19,6 +19,10 @@ GROUPS = {
     'project_path': ['test_project_path_regression'],
     'navigation_origin': ['test_explicit_folder_origin'],
     'aaa_02_core': ['test_aaa_agent_core'],
+    'aaa_03_continuity': ['test_aaa03_continuity', 'test_aaa03_agent_gateway'],
+    'aaa_04_media_state': ['test_aaa04_media_state', 'test_aaa04_agent_gateway'],
+    'aaa_05_integrated': ['test_aaa05_integrated'],
+    'aaa_06_workspace': ['test_aaa06_workspace','test_aaa06_agent_gateway'],
 }
 
 

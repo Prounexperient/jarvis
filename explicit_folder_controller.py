@@ -26,14 +26,16 @@ _ORDINALS = {
 _OPEN = re.compile(r'\b(?:abra|abrir|abre|reproduza|reproduzir|reproduz|toque|tocar|carregue|carregar|carrega)\b')
 _FIND = re.compile(r'\b(?:encontre|encontrar|procure|procurar|busque|buscar|localize|localizar|pesquise|pesquisar)\b')
 _DONT = re.compile(r'\b(?:nao|nunca|jamais|sem)\b')
-_EXPLICIT_DRIVE = re.compile(r'\b(?:disco(?:\s+local)?|unidade)\s*(?:de\s+)?([a-z])\s*:?\b')
+_EXPLICIT_DRIVE = re.compile(r'\b(?:disco|unidade)\s+(?:(?:local|colocar)(?:\s+o)?\s+)?(?:de\s+)?([a-z])\s*:?\b')
 _EXT = re.compile(r'\b(mp3|mp4|mkv|wav|flac|ogg|m4a|aac|avi|mov|webm|pdf|jpg|jpeg|png)\b')
 _POSITION = re.compile(r'\b(?:' + '|'.join(_ORDINALS) + r'|ultimo|ultima|proximo|proxima|seguinte|anterior|precedente)\b')
 _FILE_TYPE = re.compile(r'\b(?:arquivo|musica|audio|video|faixa|midia|mp3|mp4)\b')
 _SEPARATORS = re.compile(
     r'\s+(?:no|na|do|da)\s+(?:disco|unidade)\b'
-    r'|\s+e\s+(?:abra|abrir|reproduza|toque|carregue|localize|procure|encontre)\b'
+    r'|\s+dentro\s+(?:do|da|no|na)\s+(?:disco|unidade)\b'
+    r'|\s+e\s+(?:abra|abrir|reproduza|reproduzo|reproduzir|produza|toque|carregue|localize|procure|encontre)\b'
     r'|\s+(?:para\s+)?(?:abrir|reproduzir|carregar)\b'
+    r'|\s+(?:reproduza|reproduzir|reproduzo|produza|toque|tocar|abra|abrir|carregue)\b'
     r'|[.,;:!?]'
 )
 _SKIP_NAMES = {
@@ -64,6 +66,12 @@ def parse_folder_request(text):
         rest = normalized[match.end():].lstrip(' \t:,"\u201c\u201d')
         rest = re.sub(r'^(?:chamad[ao]|denominad[ao]|com\s+o\s+nome\s+de|de\s+nome)\s+', '', rest)
         candidate = _SEPARATORS.split(rest, maxsplit=1)[0].strip(' \t"\'\u201c\u201d')
+        # 'pasta de vídeos' / 'pasta de vídeo' denote the known media folder.
+        # Do not strip 'de' from arbitrary proper directory names.
+        canonical = {'de video': 'videos', 'de videos': 'videos',
+                     'de musica': 'musica', 'de musicas': 'musica',
+                     'de audio': 'audio', 'de audios': 'audio'}
+        candidate = canonical.get(candidate, candidate)
         if not candidate:
             continue
         words = candidate.split()

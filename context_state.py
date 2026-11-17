@@ -47,8 +47,8 @@ class NavigationContext:
     def _kind(path):
         ext = Path(path).suffix.lower()
         if ext == '.pdf': return 'last_pdf'
-        if ext in {'.mp3', '.wav', '.flac', '.ogg', '.m4a'}: return 'last_audio'
-        if ext in {'.mp4', '.mkv', '.avi', '.mov', '.webm'}: return 'last_video'
+        if ext in {'.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac', '.wma'}: return 'last_audio'
+        if ext in {'.mp4', '.mkv', '.avi', '.mov', '.webm', '.wmv', '.mpeg', '.mpg', '.m4v'}: return 'last_video'
         if ext in {'.py', '.js', '.ts', '.java', '.sql'}: return 'last_code_file'
         return None
 
@@ -72,7 +72,22 @@ class NavigationContext:
         elif name in {'search_files', 'search_files_in_directory'} and isinstance(results, list):
             self._set('last_search_results', {'kind': 'files', 'results': results, 'scope': result.get('scope'), 'truncated': bool(result.get('truncated') or result.get('timed_out'))})
             if name == 'search_files_in_directory' and result.get('scope'):
-                self._set('media_sequence', {'directory': result['scope'], 'results': [r for r in results if self._kind(r.get('path', '')) in {'last_audio', 'last_video'}], 'truncated': bool(result.get('truncated') or result.get('timed_out')), 'current_index': None})
+                previous = self.state.get('media_sequence') or {}
+                previous_index = previous.get('current_index')
+                # Reading all files in the same folder must not destroy a
+                # verified cursor established by playing a video or an audio.
+                preserve = (previous_index is not None and
+                            ntpath.normcase(ntpath.normpath(str(previous.get('directory')))) ==
+                            ntpath.normcase(ntpath.normpath(str(result['scope']))) and
+                            not (args.get('extension') or args.get('extensions') or args.get('query')))
+                if not preserve:
+                    self._set('media_sequence', {
+                        'directory': result['scope'],
+                        'results': [r for r in results if self._kind(r.get('path', ''))
+                                    in {'last_audio', 'last_video'}],
+                        'truncated': bool(result.get('truncated') or result.get('timed_out')),
+                        'current_index': None,
+                    })
             # Uma nova busca de arquivos com vários resultados não deve trocar o arquivo em foco.
             if len(results) == 1 and results[0].get('path'):
                 self._focus_file(results[0]['path'])
@@ -107,71 +122,82 @@ class NavigationContext:
                 self._set('media_sequence', seq)
                 return
 
-    def media_navigation(self, text):
-        """Resolve navegação de mídia, absoluta ou relativa, sem inferência do LLM.
+    def media_navigation(self, text, *, verified_directory=None):
+        """Resolve mídia com o MESMO contrato de intenção usado pelo AAA.
 
-        Somente devolve caminhos já presentes na listagem confirmada.
+        Usa apenas resultados de listagem verificados; não inventa caminhos,
+        não seleciona um vídeo quando o pedido exige áudio e não avança cursor
+        em respostas negativas. Busca de nova pasta é responsabilidade do
+        TaskContinuityManager.
         """
-        # Nova origem explícita sempre prevalece sobre a sequência anterior.
-        # Esta regra também cobre comandos ainda não resolvidos pelo controlador.
-        from explicit_folder_controller import parse_folder_request
-        if parse_folder_request(text).explicit_new_origin:
-            return None
-        norm = unicodedata.normalize('NFKD', str(text).casefold())
-        norm = ''.join(ch for ch in norm if not unicodedata.combining(ch))
-        norm = re.sub(r'[^\w\s]', ' ', norm)
-        if re.search(r'\b(nao|nunca|jamais|sem|se|quando)\b', norm):
-            return None
-        if not re.search(r'\b(reproduza|reproduzir|reproduz|toque|tocar|abra|abrir|abre|carregue|carregar|carrega)\b', norm):
-            return None
-        if re.search(r'\b(pagina|capitulo|projeto|codigo|texto|documento|modelo)\b', norm):
-            return None
+        from media_intent import AUDIO_EXTENSIONS, VIDEO_EXTENSIONS, MediaIntentResolver
         seq = self.state.get('media_sequence') or {}
         items = seq.get('results') or []
+        frame = MediaIntentResolver().interpret(text, has_media_context=bool(items))
+        if not frame['wants_open'] or frame['position'] is None:
+            return None
         if not items:
             return None
-        # Uma pasta explicitamente diferente não deve ser atendida usando a lista anterior.
         directory = seq.get('directory') or ''
-        folder_match = re.search(r'\b(?:da|na|dessa|desta) pasta\s+([\w -]+)', norm)
-        if folder_match:
-            named = folder_match.group(1).strip()
-            basename = ntpath.basename(ntpath.normpath(directory)).casefold()
-            basename = ''.join(c for c in unicodedata.normalize('NFKD', basename) if not unicodedata.combining(c))
-            if named != basename:
+        if frame['explicit_new_origin']:
+            # The only acceptable named-origin reference is the SAME tool-
+            # confirmed directory, explicitly vouched for by the caller.
+            from explicit_folder_controller import fold
+            if (not verified_directory or
+                ntpath.normcase(ntpath.normpath(str(verified_directory))) !=
+                ntpath.normcase(ntpath.normpath(str(directory))) or
+                fold(ntpath.basename(ntpath.normpath(str(directory)))) !=
+                fold(frame.get('folder_name')) or
+                (frame.get('drive') and ntpath.splitdrive(str(directory))[0].upper() !=
+                 str(frame['drive']).upper() + ':')):
                 return None
-        direction = re.search(r'\b(proximo|proxima|seguinte|anterior|precedente)\b', norm)
-        ordinals = {'primeiro': 0, 'primeira': 0, 'segundo': 1, 'segunda': 1,
-                    'terceiro': 2, 'terceira': 2, 'quarto': 3, 'quarta': 3,
-                    'quinto': 4, 'quinta': 4, 'sexto': 5, 'sexta': 5,
-                    'setimo': 6, 'setima': 6, 'oitavo': 7, 'oitava': 7,
-                    'nono': 8, 'nona': 8, 'decimo': 9, 'decima': 9}
-        absolute = re.search(r'\b(' + '|'.join(ordinals) + r'|ultimo|ultima)\b', norm)
-        numbered = re.search(r'\b(?:arquivo|musica|audio|faixa|video|midia)\s+(\d+)\b', norm)
-        if not direction and not absolute and not numbered:
+        active_directory = self.state.get('active_directory') or ''
+        # Another directory has taken focus. Never reproduce a stale sequence.
+        if active_directory and ntpath.normcase(ntpath.normpath(directory)) != ntpath.normcase(ntpath.normpath(active_directory)):
             return None
-        if not re.search(r'\b(arquivo|musica|audio|faixa|video|midia|proximo|proxima|seguinte|anterior|precedente)\b', norm):
-            return None
-        if direction and (absolute or numbered):
-            return None
-        if direction:
+        selected_kind = frame['media_kind']
+        if selected_kind is None:
+            active = str(self.state.get('active_file') or '')
+            if any(ntpath.normcase(ntpath.normpath(active)) ==
+                   ntpath.normcase(ntpath.normpath(str(x.get('path', '')))) for x in items):
+                kind = self._kind(active)
+                if kind in ('last_video', 'last_audio'):
+                    selected_kind = kind.removeprefix('last_')
+        suffixes = (VIDEO_EXTENSIONS if selected_kind == 'video' else
+                    AUDIO_EXTENSIONS if selected_kind == 'audio' else None)
+        eligible = [x for x in items if suffixes is None or
+                    ntpath.splitext(str(x.get('path', '')))[1].lower().lstrip('.') in suffixes]
+        if not eligible:
+            return {'error': 'Não há arquivos do tipo solicitado na lista confirmada.'}
+        pos = frame['position']
+        if pos in ('proximo','proxima','seguinte','anterior','precedente'):
             index = seq.get('current_index')
-            if index is None:
+            if index is None or index >= len(items):
                 return {'error': 'Não há posição de mídia ativa. Abra primeiro um arquivo da pasta.'}
-            target = index + (-1 if direction.group() in ('anterior', 'precedente') else 1)
-        elif absolute:
-            if absolute.group() in ('ultimo', 'ultima'):
-                if seq.get('truncated'):
-                    return {'error': 'A lista foi truncada. Não é possível identificar o último arquivo.'}
-                target = len(items) - 1
-            else:
-                target = ordinals[absolute.group()]
+            current_path = str(items[index].get('path', ''))
+            eligible_index = next((i for i,x in enumerate(eligible) if
+                 ntpath.normcase(ntpath.normpath(str(x.get('path','')))) ==
+                 ntpath.normcase(ntpath.normpath(current_path))), None)
+            if eligible_index is None:
+                return {'error': 'O arquivo atual não pertence ao tipo de mídia solicitado.'}
+            target = eligible_index + (-1 if pos in ('anterior','precedente') else 1)
+        elif pos in ('ultimo','ultima'):
+            if seq.get('truncated'):
+                return {'error': 'A lista foi truncada. Não é possível identificar o último arquivo.'}
+            target = len(eligible)-1
+        elif isinstance(pos, int):
+            target = pos-1
         else:
-            target = int(numbered.group(1)) - 1
-        if target < 0 or target >= len(items):
+            return None
+        if not 0 <= target < len(eligible):
             return {'error': 'Não há arquivo nessa posição na lista conhecida. Atualize a listagem da pasta.'}
-        if seq.get('truncated') and direction and target == len(items) - 1 and target > seq.get('current_index', -1):
-            return {'error': 'A lista de arquivos foi truncada. Atualize a listagem antes de continuar.'}
-        return {'path': items[target]['path'], 'position': target + 1, 'total_listed': len(items)}
+        # In truncated sequences a next item near the limit is not global proof
+        # of any eventual final position; avoid claiming full traversal.
+        if seq.get('truncated') and pos in ('ultimo','ultima'):
+            return {'error': 'A lista foi truncada. Não é possível identificar o último arquivo.'}
+        return {'path': eligible[target]['path'], 'position': target+1,
+                'total_listed': len(eligible), 'media_kind': selected_kind,
+                'directory': directory}
 
     def resolve(self, text):
         """Resolve referências anafóricas sem inventar caminhos nem executar ações."""

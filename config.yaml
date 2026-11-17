@@ -1,3 +1,8 @@
+# AAA 05 — orquestração integrada. Não substitua data/jarvis.db ao atualizar.
+autonomy:
+  compact_prompt: true
+  max_model_rounds: 14
+
 lm_studio:
   base_url: "http://127.0.0.1:1234/v1"
   model: "auto"  # usa o primeiro modelo carregado

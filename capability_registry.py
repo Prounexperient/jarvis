@@ -28,6 +28,21 @@ def describe_capabilities(config, functions, schemas):
             'is_directory': expanded.is_dir(),
             'drive': _drive_of(expanded),
         })
+    # Keep the capability inventory consistent with actual implicit Windows
+    # user-library roots admitted by tools._resolve_roots.
+    if os.name == 'nt':
+        configured = {str(Path(r['resolved'])) for r in roots}
+        for label in ('Music', 'Videos', 'Documents', 'Downloads', 'Pictures'):
+            folder = (Path.home() / label).resolve()
+            if folder.is_dir() and str(folder) not in configured:
+                roots.append({
+                    'configured': '[biblioteca pessoal padrão]',
+                    'resolved': str(folder),
+                    'exists': True,
+                    'is_directory': True,
+                    'drive': _drive_of(folder),
+                })
+                configured.add(str(folder))
     descriptions = {item['function']['name']: item['function']['description'] for item in schemas}
     tools = [{'name': name, 'description': descriptions.get(name, ''), 'registered': True}
              for name in sorted(functions) if name != 'get_system_capabilities']

@@ -8,7 +8,7 @@ import unicodedata
 from datetime import datetime
 from pathlib import Path
 
-SKIP_DIRS = {'.git', '.venv', 'venv', 'node_modules', '__pycache__', '$recycle.bin', 'system volume information'}
+SKIP_DIRS = {'.git', '.venv', 'venv', 'node_modules', '__pycache__', 'site-packages', 'dist-packages', 'env', '.env', '$recycle.bin', 'system volume information'}
 
 def normalize(value):
     value = unicodedata.normalize('NFKD', str(value).casefold())

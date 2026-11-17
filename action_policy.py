@@ -8,7 +8,7 @@ import re
 from intent_resolver import IntentResolver, normalize
 
 MEDIA_EXTENSIONS = frozenset({'.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac', '.wma',
-                              '.mp4', '.mkv', '.avi', '.mov', '.webm'})
+                              '.mp4', '.mkv', '.avi', '.mov', '.webm', '.wmv', '.mpeg', '.mpg', '.m4v'})
 WRITE_TOOLS = frozenset({
     'developer_create_python', 'developer_create_project',
     'developer_create_project_structured', 'developer_add_project_files',
@@ -67,11 +67,48 @@ class ActionPolicy:
             return bool(selected and ntpath.splitext(str(selected.get('path') or ''))[1].lower() in MEDIA_EXTENSIONS)
         return False
 
+    def _grounded_media_followup(self, name, args, request, verified_origin):
+        """Authorize only a confirmed positional media action.
+
+        Does not authorize writes, deletions, execution, generic file opening
+        or opening anything outside an already confirmed media sequence.
+        """
+        if name != 'open_file' or not verified_origin or not self._is_media_target(name,args):
+            return False
+        from media_intent import MediaIntentResolver
+        state = getattr(self.navigation,'state',{}) or {}
+        sequence = state.get('media_sequence') or {}
+        idx = sequence.get('current_index')
+        if not isinstance(idx,int) or not 0 <= idx < len(sequence.get('results') or []):
+            return False
+        if ntpath.normcase(ntpath.normpath(str(sequence.get('directory') or ''))) != ntpath.normcase(ntpath.normpath(str(verified_origin))):
+            return False
+        target = str(args.get('path') or '')
+        if not any(ntpath.normcase(ntpath.normpath(str(x.get('path') or ''))) ==
+                   ntpath.normcase(ntpath.normpath(target)) for x in sequence.get('results') or []):
+            return False
+        frame = MediaIntentResolver().interpret(request,has_media_context=True)
+        if not frame.get('wants_open') or frame.get('position') is None:
+            return False
+        if frame.get('explicit_new_origin'):
+            from explicit_folder_controller import fold
+            if (fold(ntpath.basename(ntpath.normpath(str(verified_origin)))) !=
+                fold(frame.get('folder_name')) or
+                (frame.get('drive') and ntpath.splitdrive(str(verified_origin))[0].upper() !=
+                 frame['drive'] + ':')):
+                return False
+        expected = self.navigation.media_navigation(request,verified_directory=verified_origin)
+        return bool(expected and not expected.get('error') and
+                    ntpath.normcase(ntpath.normpath(str(expected.get('path') or ''))) ==
+                    ntpath.normcase(ntpath.normpath(target)))
+
     def deny_reason(self, name, args, request, *, edit_requested=False,
                     write_authorized=False, confirmed_request=None,
-                    verified_origin=None):
+                    verified_origin=None, verified_media_context=False):
         intent = self.resolver.resolve(request)
-        if intent.general_quotation and (name in LOCAL_TOOLS or
+        media_allowed = bool(verified_media_context and self._grounded_media_followup(
+            name,args,request,verified_origin))
+        if intent.general_quotation and not media_allowed and (name in LOCAL_TOOLS or
                                          name in WRITE_TOOLS or name in RUN_TOOLS or
                                          name.startswith('developer_')):
             return ('A solicitação é uma citação de conhecimento geral, sem pedido de acesso '
@@ -129,6 +166,8 @@ class ActionPolicy:
                     return 'Não há resultado verificado para a nova pasta; pesquise a origem primeiro.'
             if intent.negative_command:
                 return 'A solicitação não autoriza abertura de arquivos.'
+            if media_allowed:
+                return None
             if intent.requested_open:
                 return None
             if intent.requested_load and self._is_media_target(name, args):
